@@ -1,42 +1,129 @@
-# 🌱 CircularScan
-### Scan → Classify → Reuse | AI for Circular Economy
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+from dotenv import load_dotenv
+import os
+import base64
+from PIL import Image
+import io
+from groq import Groq
 
-Upload any product photo → AI detects material & condition → Get instant reuse, upcycling & recycling options with local partner booking.
+load_dotenv()
 
-## 🎯 SDGs
-- ♻️ SDG 12 - Responsible Consumption & Production
-- 🏙️ SDG 11 - Sustainable Cities
-- 🌍 SDG 13 - Climate Action
+app = Flask(__name__)
+CORS(app)
 
-## 🚀 Setup & Run Locally
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-### 1. Clone the repo
-git clone https://github.com/aditya-dev99/CircularScan.git
-cd CircularScan
+UPLOAD_FOLDER = "static/uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-### 2. Create virtual environment
-- python -m venv venv
-- venv\Scripts\activate
+PARTNERS = [
+    {"name": "GreenKabadi", "type": "Recycler", "location": "Kolkata, WB", "phone": "+91-9800000001"},
+    {"name": "RepairWala", "type": "Repair Shop", "location": "Salt Lake, Kolkata", "phone": "+91-9800000002"},
+    {"name": "ArtisanUpcycle", "type": "Upcycler", "location": "Park Street, Kolkata", "phone": "+91-9800000003"},
+    {"name": "EcoDropPoint", "type": "Drop Center", "location": "New Town, Kolkata", "phone": "+91-9800000004"},
+]
 
-### 3. Install dependencies
-pip install flask flask-cors python-dotenv pillow groq
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-### 4. Create .env file
-Create a .env file in the root folder and add:
-GROQ_API_KEY=your_groq_key_here
+@app.route("/scan", methods=["POST"])
+def scan():
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
 
-Get your free Groq API key at: https://console.groq.com
+    file = request.files["image"]
+    img_bytes = file.read()
 
-### 5. Run the app
-python app.py
+    image = Image.open(io.BytesIO(img_bytes))
+    image = image.convert("RGB")
+    image.save(os.path.join(UPLOAD_FOLDER, "last_scan.jpg"))
 
-### 6. Open in browser
-http://127.0.0.1:5000
+    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-## 🛠️ Tech Stack
-- Frontend: HTML, CSS, JavaScript
-- Backend: Python Flask
-- AI: Groq API (Llama 4 Vision)
-- Image Processing: Pillow
+    prompt = """
+    You are a circular economy AI assistant.
+    Analyze this product image and respond in this exact format:
 
-## 💚 Built for the Planet
+    PRODUCT: [product name]
+    MATERIAL: [main material - plastic/metal/glass/fabric/paper/wood/electronic/mixed]
+    CONDITION: [good/fair/poor]
+    REUSE OPTIONS:
+    - [option 1]
+    - [option 2]
+    - [option 3]
+    UPCYCLING IDEAS:
+    - [idea 1]
+    - [idea 2]
+    RECYCLING TIP: [one sentence tip]
+    CO2 SAVED: [estimated kg of CO2 saved if reused instead of discarded]
+    """
+
+    response = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_base64}"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+        max_tokens=1024
+    )
+
+    result_text = response.choices[0].message.content
+    parsed = parse_response(result_text)
+    parsed["partners"] = PARTNERS
+
+    return jsonify(parsed)
+
+def parse_response(text):
+    result = {
+        "product": "",
+        "material": "",
+        "condition": "",
+        "reuse_options": [],
+        "upcycling_ideas": [],
+        "recycling_tip": "",
+        "co2_saved": ""
+    }
+
+    lines = text.strip().split("\n")
+    current_key = None
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith("PRODUCT:"):
+            result["product"] = line.replace("PRODUCT:", "").strip()
+        elif line.startswith("MATERIAL:"):
+            result["material"] = line.replace("MATERIAL:", "").strip()
+        elif line.startswith("CONDITION:"):
+            result["condition"] = line.replace("CONDITION:", "").strip()
+        elif line.startswith("REUSE OPTIONS:"):
+            current_key = "reuse_options"
+        elif line.startswith("UPCYCLING IDEAS:"):
+            current_key = "upcycling_ideas"
+        elif line.startswith("RECYCLING TIP:"):
+            result["recycling_tip"] = line.replace("RECYCLING TIP:", "").strip()
+            current_key = None
+        elif line.startswith("CO2 SAVED:"):
+            result["co2_saved"] = line.replace("CO2 SAVED:", "").strip()
+            current_key = None
+        elif line.startswith("-") and current_key:
+            result[current_key].append(line[1:].strip())
+
+    return result
+
+if __name__ == "__main__":
+    app.run(debug=True)
